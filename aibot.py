@@ -4,13 +4,14 @@ Ollama CLI – word‑by‑word streaming
 
 Features
 --------
-  `-list` – list all Ollama models
-  `-model` – choose a model (falls back to env var or first available)
+  `-list` – List all Ollama models
+  `no_md` - Disabled rich Markdown output rendering(Faster raw output, no waits
+  `-model` – Choose a model (falls back to env var or first available)
   Prompt can be given on the command line or piped in via stdin
   The answer is streamed word‑by‑word
-  `-system` – pass a system prompt that will be sent before the user prompt
-  `-num_ctx`  – token context size (default 8192)
-  `-temp` – sampling temperature (default 0.6)
+  `-system` – Pass a system prompt that will be sent before the user prompt
+  `-num_ctx` – Number context size (default 8192)
+  `-temp` – Sampling temperature (default 0.6)
   `-top_k` - Limit the next‑token choice to the `k` highest‑probability tokens when sampling (default: 40)
   `top_p` - Keep the smallest set of tokens whose cumulative probability ≥ p (default: 1)
   `min_p` - Exclude any token whose probability is below the min_p threshold (default: 0)
@@ -60,6 +61,7 @@ try:
     from rich.panel import Panel
     from rich.text import Text
     from rich.live import Live
+    from rich.markdown import Markdown
 except ImportError:
     print("You need the `rich` package (pip install rich).")
     sys.exit(1)
@@ -81,7 +83,6 @@ def list_models() -> List[str]:
         raise RuntimeError("Unexpected response format from /api/tags")
     return [t["name"] for t in tags if isinstance(t, dict) and "name" in t]
 
-
 def pick_model(user_specified: Optional[str]) -> str:
     """Resolve the model name that should be used."""
     if user_specified:
@@ -99,8 +100,7 @@ def pick_model(user_specified: Optional[str]) -> str:
 
 
 # Helpers for streaming
-
-def _json_stream(resp: requests.Response) -> Iterator[dict]:
+def json_stream(resp: requests.Response) -> Iterator[dict]:
     """Yield JSON objects from a line‑oriented response."""
     for raw_line in resp.iter_lines(decode_unicode=True):
         if not raw_line:
@@ -111,9 +111,9 @@ def _json_stream(resp: requests.Response) -> Iterator[dict]:
             continue
 
 
-# Word‑by‑word streaming (console‑only version)
-
+# Token‑by‑token streaming
 def stream_generate_console(
+    no_md: bool,
     model: str,
     prompt: str,
     system: Optional[str] = None,
@@ -158,25 +158,18 @@ def stream_generate_console(
 
         buffer = ""
 
-        for chunk in _json_stream(resp):
-            buffer += chunk.get("response", "")
-
-            # Find the first whitespace (space or newline)
-            while True:
-                idx = min((buffer.find(c) for c in (" ", "\n")
-                           if buffer.find(c) != -1), default=-1)
-                if idx == -1:
-                    break
-
-                word = buffer[: idx + 1]      # include the separator
-                buffer = buffer[idx + 1 :]
-
-                # Print the word immediately – `flush=True` makes it instant
-                console.print(word, end="", style="green")
-
-        # Anything left in the buffer (e.g. the last token)
-        if buffer:
-            console.print(buffer, end="", style="green")
+        if no_md:
+            for chunk in json_stream(resp):
+                buffer = chunk.get("response", "")
+                if buffer:
+                    # The API can emit the same token many times; just echo it
+                    console.print(buffer, end="", style="green")
+        else:
+            md = ""
+            with Live(Markdown(""), console=console, refresh_per_second=4) as live:
+                for chunk in json_stream(resp):
+                    md += chunk.get("response", "")
+                    live.update(Markdown(md))
 
     # Trailing newline to keep the console tidy
     console.print()
@@ -190,6 +183,9 @@ def main() -> None:
     parser.add_argument("-list",
                         action="store_true",
                         help="List all Ollama models")
+    parser.add_argument("-no_md",
+                        action="store_true",
+                        help="Disabled rich Markdown output rendering(Faster raw output, no waits)")
     parser.add_argument("-model",
                         help="Choose a model (falls back to env var or first available)")
     parser.add_argument("-system",
@@ -197,23 +193,23 @@ def main() -> None:
     parser.add_argument("-num_ctx",
                         type=int,
                         default=8192,
-                        help="Token context size for the model (default: 8192)")
+                        help="Token context size for the model")
     parser.add_argument("-temp",
                         type=float,
                         default=0.6,
-                        help="Sampling temperature for the model (default: 0.6)")
+                        help="Sampling temperature for the model")
     parser.add_argument("-top_k",
                         type=float,
                         default=40,
-                        help="Limit the next‑token choice to the `k` highest‑probability tokens when sampling (default: 40)")
+                        help="Limit the next‑token choice to the `k` highest‑probability tokens when sampling")
     parser.add_argument("-top_p",
                         type=float,
                         default=1,
-                        help="Keep the smallest set of tokens whose cumulative probability ≥ p (default: 1)")
+                        help="Keep the smallest set of tokens whose cumulative probability ≥ p")
     parser.add_argument("-min_p",
                         type=float,
                         default=0,
-                        help="Exclude any token whose probability is below the min_p threshold (default: 0)")
+                        help="Exclude any token whose probability is below the min_p threshold")
     parser.add_argument("-append_p", "-p",
                         nargs="?",
                         help="Append to prompt, useful when you use stdin for a prompt but you want to add/ask something")
@@ -246,7 +242,7 @@ def main() -> None:
         sys.exit(1)
 
     stream_generate_console(
-        model, prompt, system_prompt, args.num_ctx, args.temp, args.top_k, args.top_p, args.min_p
+        args.no_md, model, prompt, system_prompt, args.num_ctx, args.temp, args.top_k, args.top_p, args.min_p
     )
 
 
